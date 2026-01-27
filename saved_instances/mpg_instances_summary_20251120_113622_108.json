@@ -1,0 +1,61 @@
+{
+  "base_name": {
+    "type": "str"
+  },
+  "filename_poi": {
+    "type": "str"
+  },
+  "n_vertices": {
+    "type": "int"
+  },
+  "n_edges": {
+    "type": "int"
+  },
+  "inc_matrix": {
+    "type": "ndarray",
+    "shape": [
+      7,
+      12
+    ],
+    "dtype": "int64"
+  },
+  "edge_dict": {
+    "type": "dict",
+    "length": 7
+  },
+  "H": {
+    "type": "Hypergraph",
+    "note": "H summarized from edge_dict as edge->node-list",
+    "length": 7
+  },
+  "vertex_range": {
+    "type": "range",
+    "note": "converted range -> list",
+    "length": 12
+  },
+  "edge_range": {
+    "type": "range",
+    "note": "converted range -> list",
+    "length": 7
+  },
+  "classified": {
+    "type": "list",
+    "length": 185
+  },
+  "results1": {
+    "type": "list",
+    "length": 185
+  },
+  "summary1": {
+    "type": "dict",
+    "length": 3
+  },
+  "edge_sets": {
+    "type": "dict",
+    "length": 7
+  },
+  "results_dicts": {
+    "type": "list",
+    "length": 185
+  }
+}

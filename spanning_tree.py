@@ -152,7 +152,6 @@ def read_fixed_edge_order(path, keys=None, key_prefix="x"):
 
     return [edge for _, edge in items]
 
-FIXED_EDGE_ORDER = None
 
 def fixed_variable_order(n_vertices=n_vertices, edge_order=FIXED_EDGE_ORDER):
     verts = [f"v{i}" for i in range(1, n_vertices + 1)]
@@ -274,8 +273,6 @@ def compare_spanningtree_with_porta(A_cand, b_cand, A_porta, b_porta, var_names)
     """
     Compare spanning-tree candidates to PORTA inequalities assuming both are in a^T x ≤ b form.
     """
-
-    import numpy as np
 
     def gcd_normalize(a, b):
         a = np.asarray(a, dtype=int).copy()
@@ -501,4 +498,181 @@ def test_dominance_with_porta():
     # Analyze dominance
     print(f"\nAnalyzing dominance of {len(only_in_cand)} spanningtree-inequalities not in PORTA...")
     results = analyze_dominance(A_porta, b_porta, only_in_cand, var_names)
+    return results
+
+def vertex_to_edges(edge_dict):
+    """Return mapping vertex -> set(edges) for quick membership queries."""
+    v2e = {}
+    for e, verts in edge_dict.items():
+        for v in verts:
+            v2e.setdefault(v, set()).add(e)
+    return v2e
+
+def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cycles=None, debug=False):
+    """
+    Find gamma-cycles by enumerating cycles in the edge-adjacency graph (edges as nodes).
+    This enumerates more cycles than using the incidence-graph cycle_basis.
+    """
+    if max_length is None:
+        max_length = len(edge_dict)
+
+    v2e = vertex_to_edges(edge_dict)  # Use the global function
+
+    # Build edge-adjacency graph: nodes are edge names, edge attribute S = intersection vertices
+    Eg = nx.Graph()
+    Eg.add_nodes_from(edge_dict.keys())
+    for a, b in it.combinations(edge_dict.keys(), 2):
+        S = set(edge_dict[a]) & set(edge_dict[b])
+        if S:
+            Eg.add_edge(a, b, S=set(S))
+
+    # Convert to directed graph and enumerate all simple directed cycles,
+    # then canonicalize to undirected cycles to avoid duplicates
+    D = nx.DiGraph()
+    D.add_nodes_from(Eg.nodes())
+    for u, v in Eg.edges():
+        D.add_edge(u, v)
+        D.add_edge(v, u)
+
+    raw_cycles = list(nx.simple_cycles(D))  # may be many; filter by length below
+    if debug:
+        print("DEBUG: raw edge-cycles found:", len(raw_cycles))
+
+    def canonical_edge_cycle(cyc):
+        m = len(cyc)
+        candidates = []
+        for shift in range(m):
+            cand = tuple(cyc[shift:] + cyc[:shift])
+            candidates.append(cand)
+            candidates.append(tuple(reversed(cand)))
+        return min(candidates)
+
+    seen = set()
+    out = []
+
+    for cyc in raw_cycles:
+        m = len(cyc)
+        if m < min_length or m > max_length:
+            continue
+
+        key = canonical_edge_cycle(cyc)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges_seq = list(key)
+
+        # compute intersections S_i = edges_seq[i] ∩ edges_seq[(i+1)%m]
+        S_list = []
+        empty_intersection = False
+        for i in range(m):
+            Si = set(edge_dict[edges_seq[i]]) & set(edge_dict[edges_seq[(i+1) % m]])
+            if not Si:
+                empty_intersection = True
+                break
+            S_list.append(list(Si))
+        if empty_intersection:
+            continue
+
+        # enumerate representative vertex choices (cartesian product)
+        for combo in it.product(*S_list):
+            verts = [None] * m
+            for i in range(m):
+                verts[(i + 1) % m] = combo[i]
+
+            # Strict gamma test: require every vertex in cycle to have incident-edges exactly
+            # equal to the two consecutive edges (local check)
+            valid = True
+            for i in range(m):
+                vi = verts[i]
+                expected = {edges_seq[(i - 1) % m], edges_seq[i]}
+                actual = v2e.get(vi, set()) & set(edges_seq)
+                if actual != expected:
+                    valid = False
+                    if debug:
+                        print(f"DEBUG: combo={combo} fails at vertex {vi}: expected {expected}, actual {actual}")
+                    break
+            if not valid:
+                continue
+
+            # canonicalize vertex/edge ordering
+            candidates = []
+            for shift in range(m):
+                rv = tuple(verts[shift:] + verts[:shift])
+                re = tuple(edges_seq[shift:] + edges_seq[:shift])
+                candidates.append((rv, re))
+                rrv = tuple(list(reversed(rv)))
+                rre = tuple(list(reversed(re)))
+                candidates.append((rrv, rre))
+            canon = min(candidates)
+            v_can, e_can = canon
+            key2 = (tuple(v_can), tuple(e_can))
+            if key2 in seen:
+                continue
+            seen.add(key2)
+            out.append({"vertices": list(v_can), "edges": list(e_can)})
+            if max_cycles is not None and len(out) >= max_cycles:
+                break
+        if max_cycles is not None and len(out) >= max_cycles:
+            break
+
+    if debug:
+        print("DEBUG: gamma-cycles found:", len(out))
+    return out
+
+def canonicalize_cycle_with_focus(cycle_edges, focus_edge):
+    cycle = list(cycle_edges)
+    if focus_edge not in cycle:
+        raise ValueError("focus_edge not in cycle")
+    candidates = []
+    # original orientation
+    for i, e in enumerate(cycle):
+        if e != focus_edge:
+            continue
+        candidates.append(tuple(cycle[i:] + cycle[:i]))
+    # reversed orientation
+    rev = list(reversed(cycle))
+    for j, e in enumerate(rev):
+        if e != focus_edge:
+            continue
+        candidates.append(tuple(rev[j:] + rev[:j]))
+    return list(min(candidates))
+
+def generate_trees_for_cycles_per_focus(edge_dict, cycles,
+                                        restrict_to_f=False, dedupe=True,
+                                        max_trees_per_focus=None, verbose=False):
+    results = []
+    seen = set()
+    for cyc in cycles:
+        edges_seq = cyc['edges'] if isinstance(cyc, dict) and 'edges' in cyc else list(cyc)
+        for focus in edges_seq:
+            Gf_full = build_intersection_graph_on_N(edge_dict, focus, restrict_to_f=restrict_to_f)
+            nodes_keep = [e for e in edges_seq if e != focus and e in Gf_full.nodes()]
+            if not nodes_keep:
+                if verbose:
+                    print(f"[skip] focus={focus}: no other cycle edges in Gf")
+                continue
+            Gf_sub = Gf_full.subgraph(nodes_keep).copy()
+            if not nx.is_connected(Gf_sub):
+                if verbose:
+                    print(f"[skip] focus={focus}: induced subgraph disconnected (nodes {nodes_keep})")
+                continue
+            trees = all_spanning_trees(Gf_sub)
+            if max_trees_per_focus is not None:
+                trees = trees[:max_trees_per_focus]
+            canonical = canonicalize_cycle_with_focus(edges_seq, focus)
+            for T in trees:
+                tree_edges = tuple(sorted(tuple(sorted(e)) for e in T.edges()))
+                key = (tuple(canonical), focus, tree_edges)
+                if dedupe and key in seen:
+                    continue
+                seen.add(key)
+                results.append({
+                    "cycle_edges": list(edges_seq),
+                    "focus": focus,
+                    "canonical_cycle": list(canonical),
+                    "tree": T,
+                    "tree_edges": tree_edges,
+                })
+            if verbose:
+                print(f"cycle={edges_seq} focus={focus} -> {len(trees)} trees (kept {len(nodes_keep)} nodes)")
     return results
