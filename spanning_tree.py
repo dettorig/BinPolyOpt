@@ -511,7 +511,6 @@ def vertex_to_edges(edge_dict):
 def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cycles=None, debug=False):
     """
     Find gamma-cycles by enumerating cycles in the edge-adjacency graph (edges as nodes).
-    This enumerates more cycles than using the incidence-graph cycle_basis.
     """
     if max_length is None:
         max_length = len(edge_dict)
