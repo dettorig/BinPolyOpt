@@ -508,9 +508,14 @@ def vertex_to_edges(edge_dict):
             v2e.setdefault(v, set()).add(e)
     return v2e
 
-def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cycles=None, debug=False):
+def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cycles=None,
+                                focus_edge=None, debug=False):
     """
     Find gamma-cycles by enumerating cycles in the edge-adjacency graph (edges as nodes).
+    This enumerates more cycles than using the incidence-graph cycle_basis.
+
+    focus_edge: if set, only return cycles that include this hyperedge, and
+                count each unique edge-set once (permutation-invariant).
     """
     if max_length is None:
         max_length = len(edge_dict)
@@ -546,7 +551,9 @@ def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cy
             candidates.append(tuple(reversed(cand)))
         return min(candidates)
 
-    seen = set()
+    seen_cycles = set()
+    seen_edge_sets = set()
+    seen_vertex_cycles = set()
     out = []
 
     for cyc in raw_cycles:
@@ -555,10 +562,19 @@ def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cy
             continue
 
         key = canonical_edge_cycle(cyc)
-        if key in seen:
+        if key in seen_cycles:
             continue
-        seen.add(key)
+        seen_cycles.add(key)
         edges_seq = list(key)
+
+        if focus_edge is not None and focus_edge not in edges_seq:
+            continue
+
+        # count each edge-set once (permutation-invariant)
+        edge_set_key = frozenset(edges_seq)
+        if edge_set_key in seen_edge_sets:
+            continue
+        seen_edge_sets.add(edge_set_key)
 
         # compute intersections S_i = edges_seq[i] ∩ edges_seq[(i+1)%m]
         S_list = []
@@ -578,10 +594,14 @@ def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cy
             for i in range(m):
                 verts[(i + 1) % m] = combo[i]
 
-            # Strict gamma test: require every vertex in cycle to have incident-edges exactly
-            # equal to the two consecutive edges (local check)
+            # distinct vertices condition (Berge-cycle)
+            if len(set(verts)) != m:
+                continue
+
+            # Gamma test (cycle-only): for i=2..m, vertex v_i has incident cycle-edges
+            # exactly equal to the two consecutive edges; v1 is not restricted.
             valid = True
-            for i in range(m):
+            for i in range(1, m):
                 vi = verts[i]
                 expected = {edges_seq[(i - 1) % m], edges_seq[i]}
                 actual = v2e.get(vi, set()) & set(edges_seq)
@@ -605,9 +625,9 @@ def find_gamma_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cy
             canon = min(candidates)
             v_can, e_can = canon
             key2 = (tuple(v_can), tuple(e_can))
-            if key2 in seen:
+            if key2 in seen_vertex_cycles:
                 continue
-            seen.add(key2)
+            seen_vertex_cycles.add(key2)
             out.append({"vertices": list(v_can), "edges": list(e_can)})
             if max_cycles is not None and len(out) >= max_cycles:
                 break
