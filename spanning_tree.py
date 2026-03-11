@@ -822,3 +822,140 @@ def generate_trees_for_cycles_per_focus(edge_dict, cycles,
                 print(f"cycle={canonical} focus={focus} -> {len(trees)} spanning trees of IH(F)")
 
     return results
+
+def find_berge_cycles_edgegraph(edge_dict, min_length=2, max_length=None, max_cycles=None,
+                                focus_edge=None, debug=False):
+    """
+    Find Berge-cycles in the edge-adjacency graph (hyperedges as nodes).
+    Returns cycles as edge sequences only (no vertex output).
+
+    If focus_edge is set, only cycles containing that edge are returned and each
+    cycle is oriented to start at focus_edge. Cycles are deduped by edge-set.
+    """
+    if max_length is None:
+        max_length = len(edge_dict)
+
+    # Build edge-adjacency graph: nodes are edge names
+    Eg = nx.Graph()
+    Eg.add_nodes_from(edge_dict.keys())
+    for a, b in it.combinations(edge_dict.keys(), 2):
+        S = set(edge_dict[a]) & set(edge_dict[b])
+        if S:
+            Eg.add_edge(a, b, S=set(S))
+
+    # Enumerate all simple cycles via directed expansion
+    D = nx.DiGraph()
+    D.add_nodes_from(Eg.nodes())
+    for u, v in Eg.edges():
+        D.add_edge(u, v)
+        D.add_edge(v, u)
+
+    raw_cycles = list(nx.simple_cycles(D))
+    if debug:
+        print("DEBUG: raw edge-cycles found:", len(raw_cycles))
+
+    def canonical_edge_cycle(cyc):
+        m = len(cyc)
+        candidates = []
+        for shift in range(m):
+            cand = tuple(cyc[shift:] + cyc[:shift])
+            candidates.append(cand)
+            candidates.append(tuple(reversed(cand)))
+        return min(candidates)
+
+    def canonical_with_focus(cyc, fixed_edge):
+        if fixed_edge not in cyc:
+            raise ValueError("focus_edge not in cycle")
+        m = len(cyc)
+        candidates = []
+        for i in range(m):
+            if cyc[i] == fixed_edge:
+                candidates.append(tuple(cyc[i:] + cyc[:i]))
+        rev = list(reversed(cyc))
+        for i in range(m):
+            if rev[i] == fixed_edge:
+                candidates.append(tuple(rev[i:] + rev[:i]))
+        return list(min(candidates))
+
+    seen_raw = set()
+    seen_edge_sets = set()
+    out = []
+
+    for cyc in raw_cycles:
+        m = len(cyc)
+        if m < min_length or m > max_length:
+            continue
+
+        key = canonical_edge_cycle(cyc)
+        if key in seen_raw:
+            continue
+        seen_raw.add(key)
+        edges_seq = list(key)
+
+        if focus_edge is not None and focus_edge not in edges_seq:
+            continue
+
+        # Dedupe by edge set: same hyperedges => same cycle for your use case
+        edge_set_key = frozenset(edges_seq)
+        if edge_set_key in seen_edge_sets:
+            continue
+
+        # Consecutive intersections must be non-empty
+        S_list = []
+        empty_intersection = False
+        for i in range(m):
+            Si = set(edge_dict[edges_seq[i]]) & set(edge_dict[edges_seq[(i + 1) % m]])
+            if not Si:
+                empty_intersection = True
+                break
+            S_list.append(list(Si))
+        if empty_intersection:
+            continue
+
+        # Check existence of at least one valid vertex assignment for Berge condition
+        has_valid_assignment = False
+        for combo in it.product(*S_list):
+            verts = [None] * m
+            for i in range(m):
+                verts[(i + 1) % m] = combo[i]
+
+            # Berge-cycle: vertices must be distinct
+            if len(set(verts)) != m:
+                continue
+
+            has_valid_assignment = True
+            break
+
+        if not has_valid_assignment:
+            continue
+
+        seen_edge_sets.add(edge_set_key)
+        if focus_edge is not None:
+            out.append(canonical_with_focus(edges_seq, focus_edge))
+        else:
+            out.append(list(canonical_edge_cycle(edges_seq)))
+
+        if max_cycles is not None and len(out) >= max_cycles:
+            break
+
+    if debug:
+        print("DEBUG: berge-cycles found:", len(out))
+    return out
+
+def find_berge_cycles_per_focus(edge_dict, min_length=2, max_length=None, max_cycles=None, debug=False):
+    """
+    Return {focus_edge: [Berge cycles containing focus_edge]}.
+    Each cycle is an edge sequence starting from that focus edge.
+    """
+    result = {}
+    for focus in edge_dict:
+        result[focus] = find_berge_cycles_edgegraph(
+            edge_dict,
+            min_length=min_length,
+            max_length=max_length,
+            max_cycles=max_cycles,
+            focus_edge=focus,
+            debug=debug,
+        )
+    return result
+
