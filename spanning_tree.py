@@ -226,10 +226,10 @@ def build_spanningtree_coeffs_for_cycle(edge_dict, f, F_edges, T, rep_assignment
     return a, b, meta
 
 
-def collect_spanningtree_inequalities_from_gamma_cycles(edge_dict, inc_matrix, per_focus,
+def collect_spanningtree_inequalities_from_berge_cycles(edge_dict, inc_matrix, per_focus,
                                                         enumerate_reps=True, dedupe=True):
     """
-    Build candidate inequalities from gamma-cycle induced spanning trees.
+    Build candidate inequalities from berge-cycle induced spanning trees.
 
     per_focus: output of generate_trees_for_cycles_per_focus(...), each record must contain:
       - 'focus'
@@ -376,152 +376,253 @@ def compare_spanningtree_with_porta(A_cand, b_cand, A_porta, b_porta, var_names)
         },
     }
 
-def check_dominance(A_porta, b_porta, a_candidate, b_candidate, tol=0.001):
+
+def check_dominance(A_porta, b_porta, a_candidate, b_candidate, tol=1e-3, mult_tol=1e-8):
     """
-    Check if a candidate inequality (a_candidate^T x ≤ b_candidate) is dominated 
-    by the PORTA system (A_porta x ≤ b_porta).
-    
-    Parameters:
-    -----------
-    A_porta : numpy.ndarray
-        Matrix of PORTA inequality coefficients
-    b_porta : numpy.ndarray
-        RHS vector of PORTA inequalities
-    a_candidate : numpy.ndarray
-        Coefficient vector of candidate inequality
-    b_candidate : float/int
-        RHS of candidate inequality
-    tol : float
-        Numerical tolerance
-        
-    Returns:
-    --------
-    dict with:
-        status : str ('strictly_dominated', 'zero_dominated', 'violated', 'failed')
-        violation : float or None
-        x_witness : numpy.ndarray or None
+    Returns dominance status + dual multipliers (certificate) for dominated cases.
     """
-    n = len(a_candidate)  # number of variables
-    
-    # Solve max{a^T x - b : Ax ≤ B}
+    n = len(a_candidate)
     x = cp.Variable(n)
-    objective = cp.Maximize(a_candidate @ x - b_candidate)
-    constraints = [A_porta @ x <= b_porta]
-    
-    prob = cp.Problem(objective, constraints)
+
+    cons = [A_porta @ x <= b_porta]
+    obj = cp.Maximize(a_candidate @ x - b_candidate)
+    prob = cp.Problem(obj, cons)
+
     try:
         prob.solve(solver="ECOS")
-        
-        if prob.status == "optimal":
-            violation = prob.value
-            x_witness = x.value if abs(violation) > tol else None
-            
-            if violation < -tol:  # Clearly dominated
-                status = "strictly_dominated"
-            elif abs(violation) <= tol:  # Very close to zero
-                status = "zero_dominated"
-            else:  # violation > tol
-                status = "violated"
-                
-            return {
-                "status": status,
-                "violation": float(violation),
-                "x_witness": x_witness
-            }
     except Exception as e:
         return {
             "status": "failed",
             "violation": None,
             "x_witness": None,
-            "error": str(e)
+            "multipliers": None,
+            "error": str(e),
         }
-    
+
+    if prob.status != "optimal":
+        return {
+            "status": "failed",
+            "violation": None,
+            "x_witness": None,
+            "multipliers": None,
+        }
+
+    violation = float(prob.value)
+    x_witness = x.value if abs(violation) > tol else None
+
+    if violation < -tol:
+        status = "strictly_dominated"
+    elif abs(violation) <= tol:
+        status = "zero_dominated"
+    else:
+        status = "violated"
+
+    lamb = None
+    dual_eq_inf = None
+    dual_obj = None
+
+    # Dual multipliers for A_porta x <= b_porta
+    if cons[0].dual_value is not None:
+        lamb = np.asarray(cons[0].dual_value).reshape(-1)
+        lamb[np.abs(lamb) < mult_tol] = 0.0
+        dual_eq_inf = float(np.max(np.abs(A_porta.T @ lamb - a_candidate)))
+        dual_obj = float(b_porta @ lamb - b_candidate)
+
     return {
-        "status": "failed",
-        "violation": None, 
-        "x_witness": None
+        "status": status,
+        "violation": violation,
+        "x_witness": x_witness,
+        "multipliers": lamb,          # lambda over reference rows
+        "dual_eq_inf": dual_eq_inf,   # ||A^T lambda - a||_inf
+        "dual_obj": dual_obj,         # b^T lambda - b_candidate
     }
 
 
-def analyze_dominance(A_porta, b_porta, only_in_cand, var_names, tol=0.001):
+def analyze_dominance(A_porta, b_porta, only_in_cand, var_names, tol=1e-3,
+                      ref_row_labels=None, mult_tol=1e-8):
     """
-    Analyze dominance of candidate inequalities against PORTA system.
+    If inequality is dominated, prints the multiplier certificate.
+    ref_row_labels must align with rows of A_porta/b_porta.
     """
-    print("\nDominance Analysis of spanning-tree inequalities not in PORTA:")
-    print("-" * 80)
-
-    strictly_dominated_count = 0
-    zero_dominated_count = 0
-    violated_count = 0
-    failed_count = 0
+    if ref_row_labels is None:
+        ref_row_labels = [f"ref_row_{i}" for i in range(len(b_porta))]
 
     results = []
-    for idx, (a, b) in enumerate(sorted(only_in_cand)):
-        terms = []
-        for coef, var in zip(a, var_names):
-            if coef != 0:
-                if coef == 1:
-                    terms.append(f"+{var}")
-                elif coef == -1:
-                    terms.append(f"-{var}")
-                else:
-                    terms.append(f"{coef:+d}{var}")
-        ineq_str = " ".join(terms) + f" ≤ {b}"
-        
-        # Check dominance
-        result = check_dominance(A_porta, b_porta, np.array(a), b, tol)
-        
-        if result["status"] == "failed":
-            status = "LP FAILED"
-            failed_count += 1
-        elif result["status"] == "strictly_dominated":
-            status = f"STRICTLY DOMINATED (violation: {result['violation']:.6f})"
-            strictly_dominated_count += 1
-        elif result["status"] == "zero_dominated":
-            status = f"ZERO DOMINATED (violation: {result['violation']:.6f})"
-            zero_dominated_count += 1
-        else:  # violated
-            status = f"VIOLATED (violation: {result['violation']:.6f})"
-            violated_count += 1
-            
-        print(f"\nInequality {idx+1}:")
-        print(f"  {ineq_str}")
-        print(f"  Status: {status}")
-        
-        if result["x_witness"] is not None:
-            print("  Witness point:")
-            for var, val in zip(var_names, result["x_witness"]):
-                if abs(val) > 1e-5:
-                    print(f"    {var}: {val:.6f}")
-        
+    for idx, (a, b) in enumerate(sorted(only_in_cand), start=1):
+        a_np = np.array(a, dtype=float)
+
+        result = check_dominance(A_porta, b_porta, a_np, b, tol=tol, mult_tol=mult_tol)
+
+        print(f"\nInequality {idx}: status={result['status']}, violation={result['violation']}")
+
+        if result["status"] in ("strictly_dominated", "zero_dominated"):
+            lamb = result["multipliers"]
+            if lamb is not None:
+                nz = np.where(lamb > mult_tol)[0]
+                print(f"  Certificate rows used: {len(nz)}")
+                print(f"  dual_eq_inf={result['dual_eq_inf']:.3e}, dual_obj={result['dual_obj']:.6f}")
+                for j in nz:
+                    print(f"    lambda[{j}]={lamb[j]:.8g}  ->  {ref_row_labels[j]}")
+
         results.append({
-            "inequality": ineq_str,
+            "a": tuple(a),
+            "b": int(b),
             "status": result["status"],
             "violation": result["violation"],
-            "witness": result["x_witness"]
+            "multipliers": result["multipliers"],
+            "dual_eq_inf": result["dual_eq_inf"],
+            "dual_obj": result["dual_obj"],
         })
-    
-    print("\nSummary:")
-    print(f"Total inequalities analyzed: {len(only_in_cand)}")
-    print(f"Strictly dominated (opt < -ε): {strictly_dominated_count}")
-    print(f"Zero dominated (|opt| ≤ ε): {zero_dominated_count}")
-    print(f"Violated (opt > ε): {violated_count}")
-    print(f"LP failures: {failed_count}")
-    
+
     return results
 
 
-def test_dominance_with_porta():
+# def check_dominance(A_porta, b_porta, a_candidate, b_candidate, tol=0.001):
+#     """
+#     Check if a candidate inequality (a_candidate^T x ≤ b_candidate) is dominated 
+#     by the PORTA system (A_porta x ≤ b_porta).
+    
+#     Parameters:
+#     -----------
+#     A_porta : numpy.ndarray
+#         Matrix of PORTA inequality coefficients
+#     b_porta : numpy.ndarray
+#         RHS vector of PORTA inequalities
+#     a_candidate : numpy.ndarray
+#         Coefficient vector of candidate inequality
+#     b_candidate : float/int
+#         RHS of candidate inequality
+#     tol : float
+#         Numerical tolerance
+        
+#     Returns:
+#     --------
+#     dict with:
+#         status : str ('strictly_dominated', 'zero_dominated', 'violated', 'failed')
+#         violation : float or None
+#         x_witness : numpy.ndarray or None
+#     """
+#     n = len(a_candidate)  # number of variables
+    
+#     # Solve max{a^T x - b : Ax ≤ B}
+#     x = cp.Variable(n)
+#     objective = cp.Maximize(a_candidate @ x - b_candidate)
+#     constraints = [A_porta @ x <= b_porta]
+    
+#     prob = cp.Problem(objective, constraints)
+#     try:
+#         prob.solve(solver="ECOS")
+        
+#         if prob.status == "optimal":
+#             violation = prob.value
+#             x_witness = x.value if abs(violation) > tol else None
+            
+#             if violation < -tol:  # Clearly dominated
+#                 status = "strictly_dominated"
+#             elif abs(violation) <= tol:  # Very close to zero
+#                 status = "zero_dominated"
+#             else:  # violation > tol
+#                 status = "violated"
+                
+#             return {
+#                 "status": status,
+#                 "violation": float(violation),
+#                 "x_witness": x_witness
+#             }
+#     except Exception as e:
+#         return {
+#             "status": "failed",
+#             "violation": None,
+#             "x_witness": None,
+#             "error": str(e)
+#         }
+    
+#     return {
+#         "status": "failed",
+#         "violation": None, 
+#         "x_witness": None
+#     }
+
+
+# def analyze_dominance(A_porta, b_porta, only_in_cand, var_names, tol=0.001):
+#     """
+#     Analyze dominance of candidate inequalities against PORTA system.
+#     """
+#     print("\nDominance Analysis of spanning-tree inequalities not in PORTA:")
+#     print("-" * 80)
+
+#     strictly_dominated_count = 0
+#     zero_dominated_count = 0
+#     violated_count = 0
+#     failed_count = 0
+
+#     results = []
+#     for idx, (a, b) in enumerate(sorted(only_in_cand)):
+#         terms = []
+#         for coef, var in zip(a, var_names):
+#             if coef != 0:
+#                 if coef == 1:
+#                     terms.append(f"+{var}")
+#                 elif coef == -1:
+#                     terms.append(f"-{var}")
+#                 else:
+#                     terms.append(f"{coef:+d}{var}")
+#         ineq_str = " ".join(terms) + f" ≤ {b}"
+        
+#         # Check dominance
+#         result = check_dominance(A_porta, b_porta, np.array(a), b, tol)
+        
+#         if result["status"] == "failed":
+#             status = "LP FAILED"
+#             failed_count += 1
+#         elif result["status"] == "strictly_dominated":
+#             status = f"STRICTLY DOMINATED (violation: {result['violation']:.6f})"
+#             strictly_dominated_count += 1
+#         elif result["status"] == "zero_dominated":
+#             status = f"ZERO DOMINATED (violation: {result['violation']:.6f})"
+#             zero_dominated_count += 1
+#         else:  # violated
+#             status = f"VIOLATED (violation: {result['violation']:.6f})"
+#             violated_count += 1
+            
+#         print(f"\nInequality {idx+1}:")
+#         print(f"  {ineq_str}")
+#         print(f"  Status: {status}")
+        
+#         if result["x_witness"] is not None:
+#             print("  Witness point:")
+#             for var, val in zip(var_names, result["x_witness"]):
+#                 if abs(val) > 1e-5:
+#                     print(f"    {var}: {val:.6f}")
+        
+#         results.append({
+#             "inequality": ineq_str,
+#             "status": result["status"],
+#             "violation": result["violation"],
+#             "witness": result["x_witness"]
+#         })
+    
+#     print("\nSummary:")
+#     print(f"Total inequalities analyzed: {len(only_in_cand)}")
+#     print(f"Strictly dominated (opt < -ε): {strictly_dominated_count}")
+#     print(f"Zero dominated (|opt| ≤ ε): {zero_dominated_count}")
+#     print(f"Violated (opt > ε): {violated_count}")
+#     print(f"LP failures: {failed_count}")
+    
+#     return results
+
+
+def test_dominance_with_porta(filename):
     """
-    Test dominance of spanning-tree inequalities generated from gamma-cycle induced (f, F, T).
+    Test dominance of spanning-tree inequalities generated from berge-cycle induced (f, F, T).
     """
     # Load PORTA system
-    filename = "MPG11,9.poi.ieq"
+    filename = filename
     A_porta, b_porta = build_lp_matrices(filename, n_vertices=n_vertices, n_edges=n_edges)
 
     # Build per-focus tree records from gamma cycles
     all_per_focus = []
-    g_by_focus = find_gamma_cycles_per_focus(
+    g_by_focus = find_berge_cycles_per_focus(
         edge_dict, min_length=3, max_length=len(edge_dict), max_cycles=None, debug=False
     )
     for f, cycles_f in g_by_focus.items():
@@ -537,7 +638,7 @@ def test_dominance_with_porta():
         all_per_focus.extend(pf)
 
     # Generate spanning-tree candidates with the new collector
-    A_cand, b_cand, metas, var_names, var_index = collect_spanningtree_inequalities_from_gamma_cycles(
+    A_cand, b_cand, metas, var_names, var_index = collect_spanningtree_inequalities_from_berge_cycles(
         edge_dict=edge_dict,
         inc_matrix=inc_matrix,
         per_focus=all_per_focus,
@@ -719,12 +820,148 @@ def find_gamma_cycles_per_focus(edge_dict, min_length=3, max_length=None, max_cy
         )
     return result
 
+def find_berge_cycles_edgegraph(edge_dict, min_length=3, max_length=None, max_cycles=None,
+                                focus_edge=None, debug=False):
+    """
+    Find Berge-cycles in the edge-adjacency graph (hyperedges as nodes).
+    Returns cycles as edge sequences only (no vertex output).
+
+    If focus_edge is set, only cycles containing that edge are returned and each
+    cycle is oriented to start at focus_edge. Cycles are deduped by edge-set.
+    """
+    if max_length is None:
+        max_length = len(edge_dict)
+
+    # Build edge-adjacency graph: nodes are edge names
+    Eg = nx.Graph()
+    Eg.add_nodes_from(edge_dict.keys())
+    for a, b in it.combinations(edge_dict.keys(), 2):
+        S = set(edge_dict[a]) & set(edge_dict[b])
+        if S:
+            Eg.add_edge(a, b, S=set(S))
+
+    # Enumerate all simple cycles via directed expansion
+    D = nx.DiGraph()
+    D.add_nodes_from(Eg.nodes())
+    for u, v in Eg.edges():
+        D.add_edge(u, v)
+        D.add_edge(v, u)
+
+    raw_cycles = list(nx.simple_cycles(D))
+    if debug:
+        print("DEBUG: raw edge-cycles found:", len(raw_cycles))
+
+    def canonical_edge_cycle(cyc):
+        m = len(cyc)
+        candidates = []
+        for shift in range(m):
+            cand = tuple(cyc[shift:] + cyc[:shift])
+            candidates.append(cand)
+            candidates.append(tuple(reversed(cand)))
+        return min(candidates)
+
+    def canonical_with_focus(cyc, fixed_edge):
+        if fixed_edge not in cyc:
+            raise ValueError("focus_edge not in cycle")
+        m = len(cyc)
+        candidates = []
+        for i in range(m):
+            if cyc[i] == fixed_edge:
+                candidates.append(tuple(cyc[i:] + cyc[:i]))
+        rev = list(reversed(cyc))
+        for i in range(m):
+            if rev[i] == fixed_edge:
+                candidates.append(tuple(rev[i:] + rev[:i]))
+        return list(min(candidates))
+
+    seen_raw = set()
+    seen_edge_sets = set()
+    out = []
+
+    for cyc in raw_cycles:
+        m = len(cyc)
+        if m < min_length or m > max_length:
+            continue
+
+        key = canonical_edge_cycle(cyc)
+        if key in seen_raw:
+            continue
+        seen_raw.add(key)
+        edges_seq = list(key)
+
+        if focus_edge is not None and focus_edge not in edges_seq:
+            continue
+
+        # Dedupe by edge set: same hyperedges => same cycle for your use case
+        edge_set_key = frozenset(edges_seq)
+        if edge_set_key in seen_edge_sets:
+            continue
+
+        # Consecutive intersections must be non-empty
+        S_list = []
+        empty_intersection = False
+        for i in range(m):
+            Si = set(edge_dict[edges_seq[i]]) & set(edge_dict[edges_seq[(i + 1) % m]])
+            if not Si:
+                empty_intersection = True
+                break
+            S_list.append(list(Si))
+        if empty_intersection:
+            continue
+
+        # Berge condition: existence of pairwise-distinct bridge vertices
+        # one in each consecutive edge intersection
+        has_valid_assignment = False
+        for combo in it.product(*S_list):
+            verts = [None] * m
+            for i in range(m):
+                verts[(i + 1) % m] = combo[i]
+
+            if len(set(verts)) == m:
+                has_valid_assignment = True
+                break
+
+        if not has_valid_assignment:
+            continue
+
+        seen_edge_sets.add(edge_set_key)
+        if focus_edge is not None:
+            out.append(canonical_with_focus(edges_seq, focus_edge))
+        else:
+            out.append(list(canonical_edge_cycle(edges_seq)))
+
+        if max_cycles is not None and len(out) >= max_cycles:
+            break
+
+    if debug:
+        print("DEBUG: berge-cycles found:", len(out))
+    return out
+
+
+def find_berge_cycles_per_focus(edge_dict, min_length=3, max_length=None, max_cycles=None, debug=False):
+    """
+    Return {focus_edge: [Berge cycles containing focus_edge]}.
+    Each cycle is an edge sequence starting from that focus edge.
+    """
+    result = {}
+    for focus in edge_dict:
+        result[focus] = find_berge_cycles_edgegraph(
+            edge_dict,
+            min_length=min_length,
+            max_length=max_length,
+            max_cycles=max_cycles,
+            focus_edge=focus,
+            debug=debug,
+        )
+    return result
+
+
 def generate_trees_for_cycles_per_focus(edge_dict, cycles,
                                         focus_edge=None,
                                         restrict_to_f=False, dedupe=True,
                                         max_trees_per_focus=None, verbose=False):
     """
-    For each gamma-cycle, generate spanning trees of I_H(F), where
+    For each cycle, generate spanning trees of I_H(F), where
     F = E(cycle) \\ {focus} and focus is the fixed edge f (Theorem 1).
 
     Input cycles can be:
@@ -823,139 +1060,33 @@ def generate_trees_for_cycles_per_focus(edge_dict, cycles,
 
     return results
 
-def find_berge_cycles_edgegraph(edge_dict, min_length=2, max_length=None, max_cycles=None,
-                                focus_edge=None, debug=False):
-    """
-    Find Berge-cycles in the edge-adjacency graph (hyperedges as nodes).
-    Returns cycles as edge sequences only (no vertex output).
 
-    If focus_edge is set, only cycles containing that edge are returned and each
-    cycle is oriented to start at focus_edge. Cycles are deduped by edge-set.
-    """
-    if max_length is None:
-        max_length = len(edge_dict)
+def analyze_dominance_with_types(A_porta, b_porta, only_in_cand, var_names,
+                                 ref_row_labels, ref_row_tags, tol=1e-3, mult_tol=1e-8):
+    def _type_str(tags):
+        # keep only the labels you care about
+        keep = ["standard", "RI", "flower", "odd beta", "beta", "spanning tree"]
+        out = [t for t in keep if t in tags]
+        return ", ".join(out) if out else "unclassified"
 
-    # Build edge-adjacency graph: nodes are edge names
-    Eg = nx.Graph()
-    Eg.add_nodes_from(edge_dict.keys())
-    for a, b in it.combinations(edge_dict.keys(), 2):
-        S = set(edge_dict[a]) & set(edge_dict[b])
-        if S:
-            Eg.add_edge(a, b, S=set(S))
+    results = []
+    for idx, (a, b) in enumerate(sorted(only_in_cand), start=1):
+        result = check_dominance(A_porta, b_porta, np.array(a), b, tol)
 
-    # Enumerate all simple cycles via directed expansion
-    D = nx.DiGraph()
-    D.add_nodes_from(Eg.nodes())
-    for u, v in Eg.edges():
-        D.add_edge(u, v)
-        D.add_edge(v, u)
+        print(f"\nInequality {idx}: status={result['status']}, violation={result['violation']}")
 
-    raw_cycles = list(nx.simple_cycles(D))
-    if debug:
-        print("DEBUG: raw edge-cycles found:", len(raw_cycles))
+        if result["status"] in ("strictly_dominated", "zero_dominated") and result.get("multipliers") is not None:
+            lamb = np.asarray(result["multipliers"])
+            nz = np.where(lamb > mult_tol)[0]
+            print(f"  Certificate rows used: {len(nz)}")
+            if result.get("dual_eq_inf") is not None and result.get("dual_obj") is not None:
+                print(f"  dual_eq_inf={result['dual_eq_inf']:.3e}, dual_obj={result['dual_obj']:.6f}")
 
-    def canonical_edge_cycle(cyc):
-        m = len(cyc)
-        candidates = []
-        for shift in range(m):
-            cand = tuple(cyc[shift:] + cyc[:shift])
-            candidates.append(cand)
-            candidates.append(tuple(reversed(cand)))
-        return min(candidates)
+            for j in nz:
+                typ = _type_str(ref_row_tags[j])
+                print(f"    lambda[{j}]={lamb[j]:.8g}  ->  ref_row_{j} [{ref_row_labels[j]}] ({typ})")
 
-    def canonical_with_focus(cyc, fixed_edge):
-        if fixed_edge not in cyc:
-            raise ValueError("focus_edge not in cycle")
-        m = len(cyc)
-        candidates = []
-        for i in range(m):
-            if cyc[i] == fixed_edge:
-                candidates.append(tuple(cyc[i:] + cyc[:i]))
-        rev = list(reversed(cyc))
-        for i in range(m):
-            if rev[i] == fixed_edge:
-                candidates.append(tuple(rev[i:] + rev[:i]))
-        return list(min(candidates))
+        results.append(result)
 
-    seen_raw = set()
-    seen_edge_sets = set()
-    out = []
-
-    for cyc in raw_cycles:
-        m = len(cyc)
-        if m < min_length or m > max_length:
-            continue
-
-        key = canonical_edge_cycle(cyc)
-        if key in seen_raw:
-            continue
-        seen_raw.add(key)
-        edges_seq = list(key)
-
-        if focus_edge is not None and focus_edge not in edges_seq:
-            continue
-
-        # Dedupe by edge set: same hyperedges => same cycle for your use case
-        edge_set_key = frozenset(edges_seq)
-        if edge_set_key in seen_edge_sets:
-            continue
-
-        # Consecutive intersections must be non-empty
-        S_list = []
-        empty_intersection = False
-        for i in range(m):
-            Si = set(edge_dict[edges_seq[i]]) & set(edge_dict[edges_seq[(i + 1) % m]])
-            if not Si:
-                empty_intersection = True
-                break
-            S_list.append(list(Si))
-        if empty_intersection:
-            continue
-
-        # Check existence of at least one valid vertex assignment for Berge condition
-        has_valid_assignment = False
-        for combo in it.product(*S_list):
-            verts = [None] * m
-            for i in range(m):
-                verts[(i + 1) % m] = combo[i]
-
-            # Berge-cycle: vertices must be distinct
-            if len(set(verts)) != m:
-                continue
-
-            has_valid_assignment = True
-            break
-
-        if not has_valid_assignment:
-            continue
-
-        seen_edge_sets.add(edge_set_key)
-        if focus_edge is not None:
-            out.append(canonical_with_focus(edges_seq, focus_edge))
-        else:
-            out.append(list(canonical_edge_cycle(edges_seq)))
-
-        if max_cycles is not None and len(out) >= max_cycles:
-            break
-
-    if debug:
-        print("DEBUG: berge-cycles found:", len(out))
-    return out
-
-def find_berge_cycles_per_focus(edge_dict, min_length=2, max_length=None, max_cycles=None, debug=False):
-    """
-    Return {focus_edge: [Berge cycles containing focus_edge]}.
-    Each cycle is an edge sequence starting from that focus edge.
-    """
-    result = {}
-    for focus in edge_dict:
-        result[focus] = find_berge_cycles_edgegraph(
-            edge_dict,
-            min_length=min_length,
-            max_length=max_length,
-            max_cycles=max_cycles,
-            focus_edge=focus,
-            debug=debug,
-        )
-    return result
+    return results
 
