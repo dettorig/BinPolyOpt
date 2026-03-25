@@ -620,7 +620,7 @@ def test_dominance_with_porta(filename):
     filename = filename
     A_porta, b_porta = build_lp_matrices(filename, n_vertices=n_vertices, n_edges=n_edges)
 
-    # Build per-focus tree records from gamma cycles
+    # Build per-focus tree records from Berge cycles
     all_per_focus = []
     g_by_focus = find_berge_cycles_per_focus(
         edge_dict, min_length=3, max_length=len(edge_dict), max_cycles=None, debug=False
@@ -1064,16 +1064,33 @@ def generate_trees_for_cycles_per_focus(edge_dict, cycles,
 def analyze_dominance_with_types(A_porta, b_porta, only_in_cand, var_names,
                                  ref_row_labels, ref_row_tags, tol=1e-3, mult_tol=1e-8):
     def _type_str(tags):
-        # keep only the labels you care about
         keep = ["standard", "RI", "flower", "odd beta", "beta", "spanning tree"]
         out = [t for t in keep if t in tags]
         return ", ".join(out) if out else "unclassified"
 
+    def _fmt_ineq(a, b, var_names):
+        terms = []
+        for coef, var in zip(a, var_names):
+            if coef == 0:
+                continue
+            if coef == 1:
+                terms.append(f"+{var}")
+            elif coef == -1:
+                terms.append(f"-{var}")
+            else:
+                terms.append(f"{coef:+d}{var}")
+        lhs = " ".join(terms) if terms else "0"
+        return f"{lhs} <= {int(b)}"
+
     results = []
     for idx, (a, b) in enumerate(sorted(only_in_cand), start=1):
-        result = check_dominance(A_porta, b_porta, np.array(a), b, tol)
+        a_np = np.array(a, dtype=int)
+        ineq_str = _fmt_ineq(a_np, b, var_names)
 
-        print(f"\nInequality {idx}: status={result['status']}, violation={result['violation']}")
+        result = check_dominance(A_porta, b_porta, a_np, b, tol)
+
+        print(f"\nInequality {idx}: {ineq_str}")
+        print(f"  status={result['status']}, violation={result['violation']}")
 
         if result["status"] in ("strictly_dominated", "zero_dominated") and result.get("multipliers") is not None:
             lamb = np.asarray(result["multipliers"])
@@ -1086,7 +1103,12 @@ def analyze_dominance_with_types(A_porta, b_porta, only_in_cand, var_names,
                 typ = _type_str(ref_row_tags[j])
                 print(f"    lambda[{j}]={lamb[j]:.8g}  ->  ref_row_{j} [{ref_row_labels[j]}] ({typ})")
 
-        results.append(result)
+        results.append({
+            "inequality_index": idx,
+            "inequality": ineq_str,
+            **result
+        })
 
     return results
+
 
