@@ -1111,4 +1111,58 @@ def analyze_dominance_with_types(A_porta, b_porta, only_in_cand, var_names,
 
     return results
 
+# helper function to generate spanning-tree inequalities from incidence/mapping files
+def generate_st_from_example(
+    incidence_path,
+    mapping_path,
+    min_length=2,
+    max_cycles=None,
+    enumerate_reps=True,
+    dedupe=True,
+):
+    global edge_dict, inc_matrix, n_vertices, n_edges, FIXED_EDGE_ORDER
 
+    edge_dict, inc_matrix = read_incidence_to_edge_dict(incidence_path)
+    n_vertices = inc_matrix.shape[1]
+    n_edges = inc_matrix.shape[0]
+    FIXED_EDGE_ORDER = read_fixed_edge_order(mapping_path)
+
+    cycles_by_focus = find_berge_cycles_per_focus(
+        edge_dict,
+        min_length=min_length,
+        max_length=len(edge_dict),
+        max_cycles=max_cycles,
+        debug=False,
+    )
+
+    per_focus = []
+    for f, cycles_f in cycles_by_focus.items():
+        per_focus.extend(
+            generate_trees_for_cycles_per_focus(
+                edge_dict=edge_dict,
+                cycles=cycles_f,
+                focus_edge=f,
+                restrict_to_f=False,
+                dedupe=dedupe,
+                max_trees_per_focus=None,
+                verbose=False,
+            )
+        )
+
+    A, b, metas, var_names, var_index = collect_spanningtree_inequalities_from_berge_cycles(
+        edge_dict=edge_dict,
+        inc_matrix=inc_matrix,
+        per_focus=per_focus,
+        enumerate_reps=enumerate_reps,
+        dedupe=dedupe,
+    )
+
+    return {
+        "edge_dict": edge_dict,
+        "inc_matrix": inc_matrix,
+        "A": A,
+        "b": b,
+        "metas": metas,
+        "var_names": var_names,
+        "var_index": var_index,
+    }
